@@ -5,8 +5,9 @@
 ## 功能
 
 - **可视化面板**：左侧栏「ima 知识库」入口，支持知识库切换、文件夹浏览（面包屑）、关键词搜索、面板内文档预览（Markdown/TXT 正文、网页/微信文章沙箱渲染、PDF 内嵌查看、图片直显）
+- **笔记**：面板「笔记」页签支持列出笔记本与笔记、面板内预览笔记正文（纯文本）、新建笔记（Markdown）、向笔记末尾追加内容；知识库中的笔记条目也能直接读取正文
 - **上传**：粘贴文本生成 Markdown 文档、上传本地文件（pdf/word/ppt/excel/图片/音频/xmind 等）、导入网页与微信公众号文章 URL
-- **Agent 工具**：8 个 `ima_*` 工具（列库、搜库、列文档、搜文档、读原文、传文本、传文件、导 URL），任何 DSH 会话都可以直接让 agent 读写知识库
+- **Agent 工具**：13 个 `ima_*` 工具（列库、搜库、列文档、搜文档、读原文、传文本、传文件、导 URL、列笔记本、列笔记、读笔记、建笔记、追加笔记），任何 DSH 会话都可以直接让 agent 读写知识库与笔记
 - **凭证安全**：Client ID / API Key 存储在 DSH profile 的凭据存储中，不落盘到插件目录，不随安装介质分发
 
 ## 安装
@@ -21,7 +22,7 @@
 ## 结构
 
 ```
-index.js          Host 端：ima OpenAPI 客户端、COS 直传签名、HTTP 桥（/ima-api）、8 个 agent 工具
+index.js          Host 端：ima OpenAPI 客户端（wiki/v1 + note/v1）、COS 直传签名、HTTP 桥（/ima-api）、13 个 agent 工具
 client.js         Client 端：React 面板（浏览/搜索/上传/预览/设置）
 locale/           中英文案
 cordis.patch.yml  bundle 清单

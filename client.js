@@ -26,6 +26,23 @@ const zh = {
   tab_browse: '浏览',
   tab_search: '搜索',
   tab_upload: '上传',
+  section_kb: '知识库',
+  section_notes: '笔记',
+  notebook: '笔记本',
+  all_notes: '全部笔记',
+  note_badge: '笔记',
+  create_note_title: '新建笔记',
+  create_note_hint: '内容以 Markdown 保存；填写标题时会作为正文首个一级标题。',
+  note_title_placeholder: '笔记标题（可选）',
+  note_content_placeholder: 'Markdown 正文内容…',
+  create_note_button: '新建笔记',
+  note_created_ok: '笔记已创建',
+  save_to_notebook: '保存到笔记本',
+  append_title: '追加内容到笔记末尾',
+  append_placeholder: '要追加的 Markdown 内容…',
+  append_button: '追加',
+  append_ok: '已追加到笔记末尾',
+  modified_at: '修改于 {time}',
   folder: '文件夹',
   root: '根目录',
   empty_list: '这里还没有内容',
@@ -79,6 +96,23 @@ const en = {
   tab_browse: 'Browse',
   tab_search: 'Search',
   tab_upload: 'Upload',
+  section_kb: 'Knowledge base',
+  section_notes: 'Notes',
+  notebook: 'Notebook',
+  all_notes: 'All notes',
+  note_badge: 'Note',
+  create_note_title: 'New note',
+  create_note_hint: 'Content is saved as Markdown; the title becomes the first heading when provided.',
+  note_title_placeholder: 'Note title (optional)',
+  note_content_placeholder: 'Markdown content…',
+  create_note_button: 'Create note',
+  note_created_ok: 'Note created',
+  save_to_notebook: 'Save to notebook',
+  append_title: 'Append to end of note',
+  append_placeholder: 'Markdown content to append…',
+  append_button: 'Append',
+  append_ok: 'Appended to note',
+  modified_at: 'Modified {time}',
   folder: 'Folder',
   root: 'Root',
   empty_list: 'Nothing here yet',
@@ -256,6 +290,27 @@ window.__ModuleLoader__.load({
             fontSize: 13,
             cursor: 'pointer',
           }),
+          seg: {
+            display: 'flex',
+            gap: 3,
+            background: C.layer1,
+            border: `1px solid ${C.border}`,
+            borderRadius: 10,
+            padding: 3,
+            marginBottom: 16,
+          },
+          segItem: (on) => ({
+            flex: 1,
+            padding: '7px 14px',
+            borderRadius: 8,
+            border: 'none',
+            background: on ? C.layer2 : 'transparent',
+            color: on ? C.brand : C.label2,
+            fontSize: 13,
+            fontWeight: on ? 650 : 400,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }),
           card: {
             background: C.layer1,
             border: `1px solid ${C.border}`,
@@ -316,6 +371,181 @@ window.__ModuleLoader__.load({
             resize: 'vertical',
             fontFamily: 'inherit',
           },
+          // ---- markdown rendering -------------------------------------------
+          mdWrap: { lineHeight: 1.75, wordBreak: 'break-word' },
+          mdP: { margin: '0 0 10px' },
+          mdH1: { fontSize: 20, fontWeight: 700, margin: '16px 0 8px' },
+          mdH2: { fontSize: 17, fontWeight: 650, margin: '14px 0 6px' },
+          mdH3: { fontSize: 15, fontWeight: 650, margin: '12px 0 5px' },
+          mdH4: { fontSize: 13.5, fontWeight: 600, margin: '10px 0 4px' },
+          mdH5: { fontSize: 13, fontWeight: 600, margin: '8px 0 4px' },
+          mdH6: { fontSize: 12.5, fontWeight: 600, margin: '8px 0 4px', color: C.label2 },
+          mdHr: { border: 'none', borderTop: `1px solid ${C.border}`, margin: '12px 0' },
+          mdQuote: {
+            borderLeft: `3px solid ${C.brand}`,
+            margin: '0 0 10px',
+            padding: '2px 0 2px 12px',
+            color: C.label2,
+          },
+          mdUl: { margin: '0 0 10px', paddingLeft: 22 },
+          mdOl: { margin: '0 0 10px', paddingLeft: 24 },
+          mdLi: { margin: '2px 0' },
+          mdPre: {
+            background: C.layer2,
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: '10px 12px',
+            overflow: 'auto',
+            margin: '0 0 10px',
+          },
+          mdCode: {
+            fontFamily: 'ui-monospace, Consolas, "Courier New", monospace',
+            fontSize: 12,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          },
+          mdCodeInline: {
+            fontFamily: 'ui-monospace, Consolas, "Courier New", monospace',
+            fontSize: 12,
+            background: C.layer2,
+            borderRadius: 4,
+            padding: '1px 5px',
+          },
+        }
+
+        // ---- lightweight markdown renderer -----------------------------------
+        // Renders the common note subset (headings / lists / quotes / code /
+        // inline emphasis / links) directly to React elements — never via
+        // HTML strings, so note content cannot inject markup.
+        let mdKey = 0
+        const mdK = () => 'md' + mdKey++
+
+        function renderInline(text) {
+          // undo ima markdown-export escaping (e.g. import\_doc → import_doc)
+          const src = String(text).replace(/\\([\\`*_[\]()>#])/g, '$1')
+          const out = []
+          const re = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(\[[^\]\n]+\]\([^)\s]+\))/g
+          let last = 0
+          let m
+          while ((m = re.exec(src))) {
+            if (m.index > last) out.push(src.slice(last, m.index))
+            if (m[1]) {
+              out.push(e('code', { key: mdK(), style: styles.mdCodeInline }, m[1].slice(1, -1)))
+            } else if (m[2]) {
+              out.push(e('strong', { key: mdK() }, renderInline(m[2].slice(2, -2))))
+            } else if (m[3]) {
+              out.push(e('em', { key: mdK() }, renderInline(m[3].slice(1, -1))))
+            } else if (m[4]) {
+              out.push(e('s', { key: mdK() }, m[4].slice(2, -2)))
+            } else if (m[5]) {
+              const lm = m[5].match(/^\[([^\]]+)\]\(([^)\s]+)\)$/)
+              const href = lm && lm[2]
+              if (href && /^(https?:|mailto:)/i.test(href)) {
+                out.push(e('a', { key: mdK(), href, target: '_blank', rel: 'noreferrer', style: styles.link }, lm[1]))
+              } else {
+                out.push(m[5])
+              }
+            }
+            last = re.lastIndex
+          }
+          if (last < src.length) out.push(src.slice(last))
+          return out
+        }
+
+        function mdIsBlockStart(line) {
+          return /^\s*```/.test(line) ||
+            /^(#{1,6})\s/.test(line) ||
+            /^\s*>\s?/.test(line) ||
+            /^\s*([-*+]|\d+[.)])\s+/.test(line) ||
+            /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
+        }
+
+        // flat list items (indent-aware) → nested ul/ol React tree
+        function mdBuildList(items, idx, indent) {
+          const ordered = items[idx].ordered
+          const rows = []
+          let i = idx
+          while (i < items.length) {
+            const it = items[i]
+            if (it.indent < indent) break
+            if (it.indent > indent) {
+              const sub = mdBuildList(items, i, it.indent)
+              const last = rows[rows.length - 1]
+              if (last) last.children.push(sub.node)
+              i = sub.next
+              continue
+            }
+            rows.push({ text: it.text, children: [] })
+            i++
+          }
+          const tag = ordered ? 'ol' : 'ul'
+          return {
+            next: i,
+            node: e(tag, { key: mdK(), style: ordered ? styles.mdOl : styles.mdUl },
+              rows.map((r, n) => e('li', { key: mdK(), style: styles.mdLi },
+                renderInline(r.text),
+                r.children))),
+          }
+        }
+
+        function renderMarkdown(source) {
+          const lines = String(source).replace(/\r\n?/g, '\n').split('\n')
+          const out = []
+          let i = 0
+          while (i < lines.length) {
+            const line = lines[i]
+            if (!line.trim()) { i++; continue }
+            const fence = line.match(/^\s*```/)
+            if (fence) {
+              const buf = []
+              i++
+              while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { buf.push(lines[i]); i++ }
+              i++ // skip closing fence
+              out.push(e('pre', { key: mdK(), style: styles.mdPre }, e('code', { style: styles.mdCode }, buf.join('\n'))))
+              continue
+            }
+            const h = line.match(/^(#{1,6})\s+(.*)$/)
+            if (h) {
+              out.push(e('div', { key: mdK(), style: styles['mdH' + h[1].length] }, renderInline(h[2])))
+              i++
+              continue
+            }
+            if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+              out.push(e('hr', { key: mdK(), style: styles.mdHr }))
+              i++
+              continue
+            }
+            if (/^\s*>\s?/.test(line)) {
+              const buf = []
+              while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+                buf.push(lines[i].replace(/^\s*>\s?/, ''))
+                i++
+              }
+              out.push(e('blockquote', { key: mdK(), style: styles.mdQuote }, renderMarkdown(buf.join('\n'))))
+              continue
+            }
+            const lm = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/)
+            if (lm) {
+              const items = []
+              while (i < lines.length) {
+                const m2 = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/)
+                if (!m2) break
+                items.push({ indent: m2[1].length, ordered: /\d/.test(m2[2]), text: m2[3] })
+                i++
+              }
+              out.push(mdBuildList(items, 0, items[0].indent).node)
+              continue
+            }
+            // paragraph: consecutive plain lines folded into one
+            const buf = [line.trim()]
+            i++
+            while (i < lines.length && lines[i].trim() && !mdIsBlockStart(lines[i])) {
+              buf.push(lines[i].trim())
+              i++
+            }
+            out.push(e('p', { key: mdK(), style: styles.mdP }, renderInline(buf.join(' '))))
+          }
+          return out
         }
 
         // ---- settings view --------------------------------------------------
@@ -422,8 +652,11 @@ window.__ModuleLoader__.load({
             // web page / WeChat article: render fetched HTML in a sandboxed frame
             body = e('iframe', { style: frameStyle, sandbox: '', srcDoc: data.content })
           } else if (data?.content != null) {
-            body = e('div', { style: { ...styles.card, whiteSpace: 'pre-wrap', lineHeight: 1.7, wordBreak: 'break-word' } },
-              data.content)
+            // Markdown documents render formatted; other text stays plain
+            body = mt === 7
+              ? e('div', { style: { ...styles.card, ...styles.mdWrap } }, renderMarkdown(data.content))
+              : e('div', { style: { ...styles.card, whiteSpace: 'pre-wrap', lineHeight: 1.7, wordBreak: 'break-word' } },
+                  data.content)
           } else if (mt === 9 && data?.url) {
             body = e('img', {
               src: data.url,
@@ -455,6 +688,106 @@ window.__ModuleLoader__.load({
             body)
         }
 
+        // ---- notes ----------------------------------------------------------
+        function fmtTime(ms) {
+          const n = Number(ms)
+          if (!n) return ''
+          const d = new Date(n)
+          const pad = (x) => String(x).padStart(2, '0')
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+        }
+
+        function NoteRow({ note, onOpen }) {
+          const [hover, setHover] = useState(false)
+          return e('div', {
+            style: { ...styles.row, background: hover ? C.layer2 : 'transparent' },
+            onMouseEnter: () => setHover(true),
+            onMouseLeave: () => setHover(false),
+            onClick: () => onOpen(note),
+          },
+            e('span', { style: { fontSize: 15 } }, '📝'),
+            e('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              note.title || '(untitled)'),
+            note.summary
+              ? e('span', {
+                  style: { ...styles.muted, flex: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  note.summary)
+              : null,
+            e('span', { style: styles.badge }, fmtTime(note.modify_time) || t('note_badge')))
+        }
+
+        function NotePreviewView({ preview, appendText, busyAppend, onAppendText, onAppend, onBack }) {
+          const { note, loading, data, error } = preview
+          return e('div', null,
+            e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 12px' } },
+              e('button', { style: styles.button, onClick: onBack }, '‹ ' + t('back')),
+              e('span', {
+                style: { fontWeight: 650, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
+              }, note.title || '(untitled)'),
+              e('span', { style: styles.badge }, t('note_badge'))),
+            loading
+              ? e('div', { style: { ...styles.muted, padding: 12 } }, t('reading'))
+              : error
+                ? e('div', { style: styles.errorBox }, error)
+                : e('div', { style: { ...styles.card, ...styles.mdWrap } },
+                    renderMarkdown(data?.content ?? '')),
+            data?.truncated && e('div', { style: { ...styles.muted, marginTop: 8 } }, t('truncated_note')),
+            e('div', { style: { ...styles.card, marginTop: 12 } },
+              e('div', { style: { fontWeight: 650, marginBottom: 8 } }, t('append_title')),
+              e('textarea', {
+                style: styles.textarea,
+                value: appendText,
+                placeholder: t('append_placeholder'),
+                onChange: (ev) => onAppendText(ev.target.value),
+              }),
+              e('div', { style: { marginTop: 8 } },
+                e('button', {
+                  style: styles.primary,
+                  disabled: busyAppend || !appendText.trim(),
+                  onClick: onAppend,
+                }, busyAppend ? t('uploading') : t('append_button')))))
+        }
+
+        function CreateNoteView({
+          notebooks, folderId, onFolderChange,
+          title, onTitleChange, content, onContentChange,
+          busy, onCreate, onBack,
+        }) {
+          return e('div', null,
+            e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 12px' } },
+              e('button', { style: styles.button, onClick: onBack }, '‹ ' + t('back')),
+              e('span', { style: { fontWeight: 650, fontSize: 15 } }, t('create_note_title'))),
+            e('div', { style: { ...styles.card, marginTop: 14 } },
+              e('div', { style: { ...styles.muted, marginBottom: 8 } }, t('create_note_hint')),
+              e('div', { style: { display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                e('span', { style: styles.muted }, t('save_to_notebook')),
+                e('select', {
+                  style: { ...styles.input, width: 'auto', minWidth: 160 },
+                  value: folderId,
+                  onChange: (ev) => onFolderChange(ev.target.value),
+                },
+                  e('option', { value: '' }, t('all_notes')),
+                  notebooks.map((nb) => e('option', { key: nb.folder_id, value: nb.folder_id }, nb.name)))),
+              e('input', {
+                style: { ...styles.input, marginBottom: 8 },
+                value: title,
+                placeholder: t('note_title_placeholder'),
+                onChange: (ev) => onTitleChange(ev.target.value),
+              }),
+              e('textarea', {
+                style: styles.textarea,
+                value: content,
+                placeholder: t('note_content_placeholder'),
+                onChange: (ev) => onContentChange(ev.target.value),
+              }),
+              e('div', { style: { marginTop: 8 } },
+                e('button', {
+                  style: styles.primary,
+                  disabled: busy || !content.trim(),
+                  onClick: onCreate,
+                }, busy ? t('uploading') : t('create_note_button')))))
+        }
+
         // ---- main page ------------------------------------------------------
         function KnowledgePage() {
           const [status, setStatus] = useState('loading') // loading | unconfigured | ready
@@ -467,6 +800,7 @@ window.__ModuleLoader__.load({
           const [base, setBase] = useState(null) // selected {id, name}
 
           const [view, setView] = useState('browse')
+          const [section, setSection] = useState('kb') // 'kb' | 'notes'
 
           const [nav, setNav] = useState({ folderId: '', path: [] })
           const [docs, setDocs] = useState([])
@@ -546,12 +880,12 @@ window.__ModuleLoader__.load({
 
           // reload docs when base/folder changes
           useEffect(() => {
-            if (status !== 'ready' || !base) return
+            if (status !== 'ready' || !base || section !== 'kb') return
             setDocs([])
             setDocsCursor('')
             setDocsEnd(true)
             loadDocs({ kbId: base.id, folderId: nav.folderId })
-          }, [status, base, nav.folderId, loadDocs])
+          }, [status, base, nav.folderId, loadDocs, section])
 
           const openFolder = (item) => {
             const id = folderIdOf(item)
@@ -576,6 +910,119 @@ window.__ModuleLoader__.load({
             call('readDocument', { media_id: item.media_id })
               .then((data) => setPreview({ item, loading: false, data, error: '' }))
               .catch((err) => setPreview({ item, loading: false, data: null, error: err.message }))
+          }
+
+          // ---- notes --------------------------------------------------------
+          const [notebooks, setNotebooks] = useState([])
+          const [notesFolder, setNotesFolder] = useState('') // '' = all notes
+          const [notes, setNotes] = useState([])
+          const [notesCursor, setNotesCursor] = useState('')
+          const [notesEnd, setNotesEnd] = useState(true)
+          const [busyNotes, setBusyNotes] = useState(false)
+          const [notePreview, setNotePreview] = useState(null) // {note, loading, data, error}
+          const [noteTitle, setNoteTitle] = useState('')
+          const [noteContent, setNoteContent] = useState('')
+          const [appendText, setAppendText] = useState('')
+          const [busyNote, setBusyNote] = useState(false)
+          const [noteView, setNoteView] = useState('list') // 'list' | 'create'
+
+          // notebooks are few — pull all pages up front
+          const loadNotebooks = useCallback(async () => {
+            const all = []
+            let cursor = '0'
+            for (let page = 0; page < 20; page++) {
+              const data = await call('listNotebooks', { cursor, limit: 20 })
+              all.push(...data.list)
+              if (data.is_end) break
+              cursor = data.next_cursor || '0'
+            }
+            setNotebooks(all)
+          }, [])
+
+          useEffect(() => {
+            if (status !== 'ready' || section !== 'notes') return
+            loadNotebooks().catch(flashError)
+          }, [status, loadNotebooks, section])
+
+          const loadNotes = useCallback(
+            async ({ folderId, cursor = '', append = false }) => {
+              setBusyNotes(true)
+              try {
+                const data = await call('listNotes', { folder_id: folderId, cursor, limit: 20 })
+                setNotes((prev) => (append ? [...prev, ...data.list] : data.list))
+                setNotesCursor(data.next_cursor || '')
+                setNotesEnd(data.is_end)
+              } catch (err) {
+                flashError(err)
+              } finally {
+                setBusyNotes(false)
+              }
+            },
+            [],
+          )
+
+          useEffect(() => {
+            if (status !== 'ready' || section !== 'notes') return
+            setNotes([])
+            setNotesCursor('')
+            setNotesEnd(true)
+            setNotePreview(null)
+            setNoteView('list')
+            loadNotes({ folderId: notesFolder }).catch(() => {})
+          }, [status, notesFolder, loadNotes, section])
+
+          const openNote = (note) => {
+            if (!note.note_id) return
+            setError('')
+            setNotice('')
+            setAppendText('')
+            setNotePreview({ note, loading: true, data: null, error: '' })
+            call('readNote', { note_id: note.note_id })
+              .then((data) => setNotePreview({ note, loading: false, data, error: '' }))
+              .catch((err) => setNotePreview({ note, loading: false, data: null, error: err.message }))
+          }
+
+          const createNote = async () => {
+            if (!noteContent.trim()) return
+            setBusyNote(true)
+            setError('')
+            try {
+              const title = noteTitle.trim()
+              const nb = notebooks.find((x) => x.folder_id === notesFolder)
+              const r = await call('createNote', {
+                ...(notesFolder ? { folder_id: notesFolder, folder_name: nb?.name } : {}),
+                ...(title ? { title } : {}),
+                content: noteContent,
+              })
+              setNotice(t('note_created_ok'))
+              setNoteTitle('')
+              setNoteContent('')
+              setNoteView('list')
+              loadNotes({ folderId: notesFolder })
+              if (r.note_id) openNote({ note_id: r.note_id, title })
+            } catch (err) {
+              flashError(err)
+            } finally {
+              setBusyNote(false)
+            }
+          }
+
+          const appendToNote = async () => {
+            if (!notePreview?.note || !appendText.trim()) return
+            setBusyNote(true)
+            setError('')
+            try {
+              await call('appendNote', { note_id: notePreview.note.note_id, content: appendText })
+              setNotice(t('append_ok'))
+              setAppendText('')
+              const data = await call('readNote', { note_id: notePreview.note.note_id })
+              setNotePreview((prev) => (prev ? { ...prev, data } : prev))
+              loadNotes({ folderId: notesFolder })
+            } catch (err) {
+              flashError(err)
+            } finally {
+              setBusyNote(false)
+            }
           }
 
           const doSearch = async (cursor = '', append = false) => {
@@ -683,6 +1130,9 @@ window.__ModuleLoader__.load({
               setBase(null)
               setDocs([])
               setResults(null)
+              setNotebooks([])
+              setNotes([])
+              setNotePreview(null)
             }
           }
 
@@ -700,7 +1150,19 @@ window.__ModuleLoader__.load({
 
           return e('div', { style: styles.page },
             e('div', { style: styles.inner },
-              // header
+              // ---- top-level section switcher: knowledge base / notes ----
+              e('div', { style: styles.seg },
+                ['kb', 'notes'].map((s) =>
+                  e('button', {
+                    key: s,
+                    style: styles.segItem(section === s),
+                    onClick: () => { setSection(s); setPreview(null); setNotePreview(null) },
+                  }, t(`section_${s}`)))),
+              error ? e('div', { style: { ...styles.errorBox, marginTop: 12 } }, error) : null,
+              notice ? e('div', { style: { ...styles.okBox, marginTop: 12 } }, notice) : null,
+
+              // ---- knowledge base section ----
+              section === 'kb' && e(React.Fragment, null,
               e('div', { style: styles.headerRow },
                 e('span', { style: styles.title }, t('panel')),
                 e('select', {
@@ -722,9 +1184,6 @@ window.__ModuleLoader__.load({
                 e('button', { style: styles.button, onClick: clearCredentials }, t('clear_credentials')),
               ),
               base?.description && e('div', { style: { ...styles.muted, marginTop: 8, lineHeight: 1.6 } }, base.description),
-
-              error ? e('div', { style: { ...styles.errorBox, marginTop: 12 } }, error) : null,
-              notice ? e('div', { style: { ...styles.okBox, marginTop: 12 } }, notice) : null,
 
               // in-panel document preview replaces the tab area
               preview
@@ -862,7 +1321,68 @@ window.__ModuleLoader__.load({
                       onClick: importUrls,
                     }, busyUpload ? t('uploading') : t('upload_url_button')))),
               ),
-                ), // end React.Fragment (non-preview content)
+
+                ), // end kb content fragment
+              ), // end kb section
+
+              // ---- notes section ----
+              section === 'notes' && e(React.Fragment, null,
+                e('div', { style: { ...styles.headerRow, marginTop: 14 } },
+                  e('span', { style: styles.title }, t('section_notes')),
+                  e('select', {
+                    style: { ...styles.input, width: 'auto', minWidth: 200 },
+                    value: notesFolder,
+                    onChange: (ev) => setNotesFolder(ev.target.value),
+                  },
+                    e('option', { value: '' }, t('all_notes')),
+                    notebooks.map((nb) =>
+                      e('option', { key: nb.folder_id, value: nb.folder_id },
+                        nb.name + (nb.note_number != null ? ` (${nb.note_number})` : '')))),
+                  e('div', { style: styles.grow }),
+                  e('button', {
+                    style: styles.primary,
+                    onClick: () => setNoteView('create'),
+                  }, t('create_note_button')),
+                  e('button', {
+                    style: styles.button,
+                    disabled: busyNotes,
+                    onClick: () => loadNotes({ folderId: notesFolder }).catch(flashError),
+                  }, t('refresh'))),
+                notePreview
+                  ? e(NotePreviewView, {
+                      preview: notePreview,
+                      appendText,
+                      busyAppend: busyNote,
+                      onAppendText: setAppendText,
+                      onAppend: appendToNote,
+                      onBack: () => setNotePreview(null),
+                    })
+                  : noteView === 'create'
+                    ? e(CreateNoteView, {
+                        notebooks,
+                        folderId: notesFolder,
+                        onFolderChange: setNotesFolder,
+                        title: noteTitle,
+                        onTitleChange: setNoteTitle,
+                        content: noteContent,
+                        onContentChange: setNoteContent,
+                        busy: busyNote,
+                        onCreate: createNote,
+                        onBack: () => setNoteView('list'),
+                      })
+                    : e(React.Fragment, null,
+                e('div', { style: { ...styles.card, marginTop: 14 } },
+                  notes.length === 0 && !busyNotes
+                    ? e('div', { style: { ...styles.muted, padding: 8 } }, t('empty_list'))
+                    : notes.map((n, i) => e(NoteRow, { key: n.note_id || i, note: n, onOpen: openNote })),
+                  busyNotes && e('div', { style: { ...styles.muted, padding: 8 } }, t('loading'))),
+                !notesEnd && notesCursor && e('button', {
+                  style: { ...styles.button, marginBottom: 12 },
+                  disabled: busyNotes,
+                  onClick: () => loadNotes({ folderId: notesFolder, cursor: notesCursor, append: true }),
+                }, t('load_more')),
+                ), // end notes content fragment
+              ), // end notes section
             ))
         }
 

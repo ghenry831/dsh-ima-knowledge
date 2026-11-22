@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const API_BASE = 'https://ima.qq.com/openapi/wiki/v1'
+const NOTE_API_BASE = 'https://ima.qq.com/openapi/note/v1'
 const CRED_KEY = 'ima-knowledge/openapi'
 const MAX_HTTP_BODY = 260 * 1024 * 1024 // ~200MB file as base64 JSON
 
@@ -31,10 +32,10 @@ async function loadCredentials(ctx) {
   return { clientId: payload.clientId, apiKey: payload.apiKey }
 }
 
-async function imaApi(creds, endpoint, body, signal) {
+async function imaApi(creds, endpoint, body, signal, base = API_BASE) {
   let res
   try {
-    res = await fetch(`${API_BASE}/${endpoint}`, {
+    res = await fetch(`${base}/${endpoint}`, {
       method: 'POST',
       headers: {
         'ima-openapi-clientid': creds.clientId,
@@ -464,6 +465,116 @@ function makeOps(ctx) {
     return { results }
   }
 
+  // ---- notes (openapi/note/v1) ------------------------------------------
+  // 笔记 API 只支持：列出笔记本 / 列出笔记 / 读正文 / 从 Markdown 新建 /
+  // 向末尾追加 Markdown。没有全量替换、任意位置编辑或删除接口；
+  // 读取优先 Markdown（format=1，保留换行与结构），失败回退纯文本（format=0
+  // 服务端会折叠换行）；写入仅支持 Markdown。
+
+  ops.listNotebooks = async ({ cursor = '0', limit = 20 } = {}, signal) => {
+    const creds = await loadCredentials(ctx)
+    const data = await imaApi(
+      creds,
+      'list_notebook',
+      { cursor, limit: clamp(limit, 1, 20) },
+      signal,
+      NOTE_API_BASE,
+    )
+    return {
+      list: data?.note_folder_infos ?? [],
+      is_end: Boolean(data?.is_end),
+      next_cursor: data?.next_cursor ?? '',
+    }
+  }
+
+  ops.listNotes = async ({ folder_id = '', sort_type = 0, cursor = '', limit = 20 } = {}, signal) => {
+    const creds = await loadCredentials(ctx)
+    const data = await imaApi(
+      creds,
+      'list_note',
+      { folder_id, sort_type, cursor, limit: clamp(limit, 1, 20) },
+      signal,
+      NOTE_API_BASE,
+    )
+    return {
+      list: data?.note_book_list ?? [],
+      is_end: Boolean(data?.is_end),
+      next_cursor: data?.next_cursor ?? '',
+    }
+  }
+
+  ops.readNote = async ({ note_id, max_chars = 60000 } = {}, signal) => {
+    require(note_id, 'note_id')
+    const creds = await loadCredentials(ctx)
+    // format 1 返回 Markdown 源码（保留换行与结构）；个别笔记可能不支持，
+    // 失败时回退 format 0 纯文本（服务端会折叠换行，属已知限制）。
+    let data = null
+    try {
+      data = await imaApi(
+        creds,
+        'get_doc_content',
+        { note_id, target_content_format: 1 },
+        signal,
+        NOTE_API_BASE,
+      )
+    } catch (err) {
+      if (signal?.aborted) throw err
+      data = await imaApi(
+        creds,
+        'get_doc_content',
+        { note_id, target_content_format: 0 },
+        signal,
+        NOTE_API_BASE,
+      )
+    }
+    const content = data?.content ?? ''
+    const truncated = content.length > max_chars
+    return {
+      note_id,
+      truncated,
+      content: truncated ? content.slice(0, max_chars) : content,
+    }
+  }
+
+  ops.createNote = async ({ folder_id, folder_name, title, content } = {}, signal) => {
+    if (typeof content !== 'string' || !content.trim()) throw new ImaError('请提供笔记内容 content')
+    // import_doc 没有 title 字段，标题取自正文首个标题行；内容本身不以
+    // '#' 开头时，把 title 提升为一级标题，保证笔记有可读标题。
+    let body = content
+    if (typeof title === 'string' && title.trim() && !content.trimStart().startsWith('#')) {
+      body = `# ${title.trim()}\n\n${content}`
+    }
+    const creds = await loadCredentials(ctx)
+    const data = await imaApi(
+      creds,
+      'import_doc',
+      {
+        content_format: 1,
+        content: body,
+        ...(folder_id ? { folder_id, folder_name } : {}),
+      },
+      signal,
+      NOTE_API_BASE,
+    )
+    return { note_id: data?.note_id ?? '' }
+  }
+
+  ops.appendNote = async ({ note_id, content } = {}, signal) => {
+    require(note_id, 'note_id')
+    if (typeof content !== 'string' || !content.trim()) {
+      throw new ImaError('请提供要追加的内容 content')
+    }
+    const creds = await loadCredentials(ctx)
+    await imaApi(
+      creds,
+      'append_doc',
+      { note_id, content_format: 1, content },
+      signal,
+      NOTE_API_BASE,
+    )
+    return { note_id, appended: true }
+  }
+
   ops.readDocument = async ({ media_id, max_chars = 60000 } = {}, signal) => {
     require(media_id, 'media_id')
     const creds = await loadCredentials(ctx)
@@ -471,11 +582,42 @@ function makeOps(ctx) {
     const mediaType = data?.media_type
     const typeName = MEDIA_TYPE_NAMES[mediaType] ?? '未知'
     if (mediaType === 11) {
+      const noteId = data?.notebook_ext_info?.notebook_id
+      if (noteId) {
+        // 笔记正文走 note/v1 get_doc_content，优先 Markdown（保留换行）
+        let note = null
+        try {
+          note = await imaApi(
+            creds,
+            'get_doc_content',
+            { note_id: noteId, target_content_format: 1 },
+            signal,
+            NOTE_API_BASE,
+          )
+        } catch (err) {
+          if (signal?.aborted) throw err
+          note = await imaApi(
+            creds,
+            'get_doc_content',
+            { note_id: noteId, target_content_format: 0 },
+            signal,
+            NOTE_API_BASE,
+          )
+        }
+        const content = note?.content ?? ''
+        const truncated = content.length > max_chars
+        return {
+          media_type: mediaType,
+          media_type_name: typeName,
+          note_id: noteId,
+          truncated,
+          content: truncated ? content.slice(0, max_chars) : content,
+        }
+      }
       return {
         media_type: mediaType,
         media_type_name: typeName,
-        note: '这是 ima 笔记，请在 ima 客户端查看（notebook_id: ' +
-          (data?.notebook_ext_info?.notebook_id ?? '未知') + '）',
+        note: '这是 ima 笔记，请在 ima 客户端查看',
       }
     }
     const url = data?.url_info?.url
@@ -539,15 +681,40 @@ function appendTimestamp(fileName) {
 // ---------------------------------------------------------------------------
 
 const jsonOutput = {
-  schema: { type: 'object' },
+  // 显式写 additionalProperties：DSH 的 JSON Schema 子集要求 object 类型必须
+  // 声明开放性（`defineTool()` 会对此强制校验），写死 true 可避免后续升级被拒。
+  schema: { type: 'object', additionalProperties: true },
   render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
 }
 
 const NO_CREDENTIALS_HINT =
   '若提示未配置凭证，请引导用户打开「ima 知识库」面板（左侧栏图标）填写 Client ID 与 API Key。'
 
+/**
+ * 把 author 侧的参数 DSL（属性表 + 每个属性里的 `required: true`）编译成
+ * 根为 `object` 的标准 JSON Schema。
+ *
+ * 注意：`@deepseek-ai/dsh-tools` 的 `defineTool()` 会做同样的投影，但那是
+ * Host 内部包，插件目录里解析不到，所以这里本地实现一份等价逻辑。若直接把
+ * DSL 原样交给 `ctx.tools.register()`，schema 会按原样上送给模型供应商，
+ * 缺少根节点 `type: "object"`，严格校验的供应商（如 kimi）会直接拒绝请求：
+ * `tools.function.parameters.type is required and must be "object"`。
+ */
+function compileParameters(spec) {
+  const properties = {}
+  const required = []
+  for (const [key, value] of Object.entries(spec ?? {})) {
+    const { required: isRequired, ...schema } = value
+    if (isRequired === true) required.push(key)
+    properties[key] = schema
+  }
+  const compiled = { type: 'object', properties }
+  if (required.length > 0) compiled.required = required
+  return compiled
+}
+
 function defineImaTool(def) {
-  return def
+  return { ...def, parameters: compileParameters(def.parameters) }
 }
 
 const TOOLS = [
@@ -556,8 +723,8 @@ const TOOLS = [
     description:
       '列出当前用户在腾讯 ima 中可添加内容的知识库（含名称、描述、推荐问题）。当用户想浏览自己的知识库，或要上传内容但未指定目标知识库时使用。返回 ima 知识库列表，每项含 id（knowledge_base_id）与 name。',
     parameters: {
-      cursor: { type: 'string', required: false, description: '翻页游标，首次传空字符串' },
-      limit: { type: 'number', required: false, description: '每页数量，1-50，默认 20' },
+      cursor: { type: 'string', description: '翻页游标，首次传空字符串' },
+      limit: { type: 'number', description: '每页数量，1-50，默认 20' },
     },
     output: jsonOutput,
     isConcurrencySafe: () => true,
@@ -572,7 +739,7 @@ const TOOLS = [
       '按名称关键词搜索 ima 知识库（query 传空字符串可列出全部知识库）。用户给出知识库名称但需要其 ID 时使用。',
     parameters: {
       query: { type: 'string', required: true, description: '知识库名称关键词，空字符串列出全部' },
-      cursor: { type: 'string', required: false, description: '翻页游标，首次传空字符串' },
+      cursor: { type: 'string', description: '翻页游标，首次传空字符串' },
     },
     output: jsonOutput,
     isConcurrencySafe: () => true,
@@ -584,9 +751,9 @@ const TOOLS = [
       '浏览 ima 知识库中的文档与文件夹（返回混合列表：文件夹有 folder_id，文档有 media_id）。可传 folder_id 进入子文件夹，current_path 为面包屑。根目录省略 folder_id。',
     parameters: {
       knowledge_base_id: { type: 'string', required: true, description: '知识库 ID' },
-      folder_id: { type: 'string', required: false, description: '文件夹 ID，省略则列根目录' },
-      cursor: { type: 'string', required: false, description: '翻页游标，首次传空字符串' },
-      limit: { type: 'number', required: false, description: '每页数量，1-50，默认 50' },
+      folder_id: { type: 'string', description: '文件夹 ID，省略则列根目录' },
+      cursor: { type: 'string', description: '翻页游标，首次传空字符串' },
+      limit: { type: 'number', description: '每页数量，1-50，默认 50' },
     },
     output: jsonOutput,
     isConcurrencySafe: () => true,
@@ -599,7 +766,7 @@ const TOOLS = [
     parameters: {
       query: { type: 'string', required: true, description: '搜索关键词' },
       knowledge_base_id: { type: 'string', required: true, description: '知识库 ID' },
-      cursor: { type: 'string', required: false, description: '翻页游标，首次传空字符串' },
+      cursor: { type: 'string', description: '翻页游标，首次传空字符串' },
     },
     output: jsonOutput,
     isConcurrencySafe: () => true,
@@ -608,10 +775,10 @@ const TOOLS = [
   defineImaTool({
     name: 'ima_read_document',
     description:
-      '读取 ima 知识库文档原文。文本类文档（网页/微信文章/Markdown/TXT）直接返回正文内容；PDF/Word 等二进制文档返回可下载的原文链接（可用支持下载解析的工具继续处理）；ima 笔记需在 ima 客户端查看。',
+      '读取 ima 知识库文档原文。文本类文档（网页/微信文章/Markdown/TXT）直接返回正文内容；PDF/Word 等二进制文档返回可下载的原文链接（可用支持下载解析的工具继续处理）；ima 笔记（media_type 11）优先返回 Markdown 源码（保留换行与结构，note_id 可用于 ima_append_note 追加内容）。',
     parameters: {
       media_id: { type: 'string', required: true, description: '文档的 media_id' },
-      max_chars: { type: 'number', required: false, description: '正文最大字符数，默认 60000' },
+      max_chars: { type: 'number', description: '正文最大字符数，默认 60000' },
     },
     output: jsonOutput,
     timeoutMs: 90_000,
@@ -626,7 +793,7 @@ const TOOLS = [
       knowledge_base_id: { type: 'string', required: true, description: '知识库 ID' },
       title: { type: 'string', required: true, description: '文档标题' },
       content: { type: 'string', required: true, description: 'Markdown 正文内容' },
-      folder_id: { type: 'string', required: false, description: '目标文件夹 ID，省略则根目录' },
+      folder_id: { type: 'string', description: '目标文件夹 ID，省略则根目录' },
     },
     output: jsonOutput,
     timeoutMs: 120_000,
@@ -639,7 +806,7 @@ const TOOLS = [
     parameters: {
       knowledge_base_id: { type: 'string', required: true, description: '知识库 ID' },
       file_path: { type: 'string', required: true, description: '本机文件绝对路径' },
-      folder_id: { type: 'string', required: false, description: '目标文件夹 ID，省略则根目录' },
+      folder_id: { type: 'string', description: '目标文件夹 ID，省略则根目录' },
     },
     output: jsonOutput,
     timeoutMs: 300_000,
@@ -657,11 +824,76 @@ const TOOLS = [
         description: 'URL 列表（1-10 个）',
         items: { type: 'string' },
       },
-      folder_id: { type: 'string', required: false, description: '目标文件夹 ID，省略则根目录' },
+      folder_id: { type: 'string', description: '目标文件夹 ID，省略则根目录' },
     },
     output: jsonOutput,
     timeoutMs: 120_000,
     execute: async (args, exec) => execImaOps(exec).importUrls(args, exec.signal),
+  }),
+  defineImaTool({
+    name: 'ima_list_notebooks',
+    description:
+      '列出腾讯 ima 的笔记本（含名称、笔记数量、嵌套关系）。当用户想浏览笔记或新建/追加笔记前需要确认目标笔记本时使用。',
+    parameters: {
+      cursor: { type: 'string', description: '翻页游标，第一页传 "0"' },
+      limit: { type: 'number', description: '每页数量，1-20，默认 20' },
+    },
+    output: jsonOutput,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => execImaOps(exec).listNotebooks(args, exec.signal),
+  }),
+  defineImaTool({
+    name: 'ima_list_notes',
+    description:
+      '列出腾讯 ima 笔记。folder_id 省略则列出全部笔记，返回标题、简介、创建/修改时间。翻页：首次 cursor 传空字符串。',
+    parameters: {
+      folder_id: { type: 'string', description: '笔记本 ID，省略则列出全部笔记' },
+      sort_type: { type: 'number', description: '排序：0=修改时间(默认)，1=创建时间，2=标题，3=大小' },
+      cursor: { type: 'string', description: '翻页游标，首次传空字符串' },
+      limit: { type: 'number', description: '每页数量，1-20，默认 20' },
+    },
+    output: jsonOutput,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => execImaOps(exec).listNotes(args, exec.signal),
+  }),
+  defineImaTool({
+    name: 'ima_read_note',
+    description:
+      '读取腾讯 ima 笔记正文，优先返回 Markdown 源码（保留换行与结构；个别笔记可能回退为纯文本，会丢失换行与格式）。',
+    parameters: {
+      note_id: { type: 'string', required: true, description: '笔记 ID' },
+      max_chars: { type: 'number', description: '正文最大字符数，默认 60000' },
+    },
+    output: jsonOutput,
+    timeoutMs: 90_000,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => execImaOps(exec).readNote(args, exec.signal),
+  }),
+  defineImaTool({
+    name: 'ima_create_note',
+    description:
+      '在腾讯 ima 中新建一篇笔记（Markdown 内容）。笔记将保存到指定笔记本（folder_id 省略则存入默认位置）。注意：ima 笔记 API 不支持设置标题字段，若 content 不以 # 开头且提供了 title，会把 title 作为一级标题插入正文开头。返回新笔记的 note_id。',
+    parameters: {
+      content: { type: 'string', required: true, description: 'Markdown 正文内容' },
+      title: { type: 'string', description: '笔记标题（content 不以 # 开头时提升为一级标题）' },
+      folder_id: { type: 'string', description: '目标笔记本 ID，省略则默认位置' },
+      folder_name: { type: 'string', description: '目标笔记本名称（与 folder_id 一起提供）' },
+    },
+    output: jsonOutput,
+    timeoutMs: 120_000,
+    execute: async (args, exec) => execImaOps(exec).createNote(args, exec.signal),
+  }),
+  defineImaTool({
+    name: 'ima_append_note',
+    description:
+      '向腾讯 ima 笔记末尾追加 Markdown 内容。ima 笔记 API 只支持追加，不支持替换、插入或删除已有内容；如需"修改"，通常是读出原文后由用户确认，再追加修订内容。',
+    parameters: {
+      note_id: { type: 'string', required: true, description: '目标笔记 ID' },
+      content: { type: 'string', required: true, description: '要追加的 Markdown 内容' },
+    },
+    output: jsonOutput,
+    timeoutMs: 120_000,
+    execute: async (args, exec) => execImaOps(exec).appendNote(args, exec.signal),
   }),
 ]
 
@@ -751,7 +983,7 @@ export function apply(ctx) {
           name: 'ima-knowledge',
           order: 90,
           text:
-            `腾讯 ima 知识库已接入：可调用 ima_list_knowledge_bases / ima_search_knowledge_bases / ima_list_documents / ima_search_documents / ima_read_document / ima_upload_text / ima_upload_file / ima_import_urls 工具读写用户的 ima 知识库。${NO_CREDENTIALS_HINT}`,
+            `腾讯 ima 知识库已接入：可调用 ima_list_knowledge_bases / ima_search_knowledge_bases / ima_list_documents / ima_search_documents / ima_read_document / ima_upload_text / ima_upload_file / ima_import_urls 工具读写用户的 ima 知识库；可调用 ima_list_notebooks / ima_list_notes / ima_read_note / ima_create_note / ima_append_note 工具管理 ima 笔记（笔记读取优先返回 Markdown 源码，写入仅支持 Markdown 新建/末尾追加，不支持替换或删除）。${NO_CREDENTIALS_HINT}`,
         }),
       'ima system prompt',
     )
