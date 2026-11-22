@@ -1,0 +1,3 @@
+- insert:
+    - id: ima-knowledge
+      name: '@local/dsh-ima-knowledge'
