@@ -1,6 +1,11 @@
 import crypto from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
+import { readFile, writeFile, unlink } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
+import path, { join } from 'node:path'
+
+const execFileAsync = promisify(execFile)
 
 const API_BASE = 'https://ima.qq.com/openapi/wiki/v1'
 const NOTE_API_BASE = 'https://ima.qq.com/openapi/note/v1'
@@ -629,6 +634,34 @@ function makeOps(ctx) {
       }
     }
     const headers = data?.url_info?.headers ?? {}
+    // 二进制文档：PDF 自动提取文本，其余返回下载链接。
+    if (mediaType === 1) {
+      let pdfText = ''
+      try {
+        const pdfRes = await fetch(url, { headers, signal: signalWithTimeout(signal, 60_000) })
+        if (pdfRes.ok) {
+          const buf = Buffer.from(await pdfRes.arrayBuffer())
+          // 用 Python PyMuPDF 提取（Node 无原生 PDF 解析）
+          pdfText = await extractPdfTextViaPython(buf)
+        }
+      } catch { /* fall through to link-only */ }
+      if (pdfText.trim()) {
+        const truncated = pdfText.length > max_chars
+        return {
+          media_type: mediaType,
+          media_type_name: typeName,
+          url,
+          truncated,
+          content: truncated ? pdfText.slice(0, max_chars) : pdfText,
+        }
+      }
+      return {
+        media_type: mediaType,
+        media_type_name: typeName,
+        url,
+        note: 'PDF 无文本层（可能是扫描件），可用此链接下载原文。',
+      }
+    }
     const textTypes = new Set([2, 6, 7, 13])
     if (!textTypes.has(mediaType)) {
       return {
@@ -640,12 +673,25 @@ function makeOps(ctx) {
     }
     let res
     try {
-      res = await fetch(url, { headers, signal: signalWithTimeout(signal, 60_000) })
+      // WeChat mp.weixin.qq.com rejects requests without a browser UA
+      // (returns an "environment abnormal" verification page instead).
+      const fetchHeaders = { ...headers }
+      if (mediaType === 6 || mediaType === 2) {
+        if (!fetchHeaders['User-Agent'] && !fetchHeaders['user-agent']) {
+          fetchHeaders['User-Agent'] =
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      }
+      res = await fetch(url, { headers: fetchHeaders, signal: signalWithTimeout(signal, 60_000) })
     } catch (error) {
       throw new ImaError(`获取原文失败：${error.message}`)
     }
     if (!res.ok) throw new ImaError(`获取原文失败（HTTP ${res.status}），请使用 ima 客户端查看原文`)
-    const raw = await res.text()
+    let raw = await res.text()
+    // 网页/微信文章：HTML 转纯文本后再交给 agent。
+    if (mediaType === 2 || mediaType === 6) {
+      raw = htmlToText(raw)
+    }
     const truncated = raw.length > max_chars
     return {
       media_type: mediaType,
@@ -658,6 +704,122 @@ function makeOps(ctx) {
 
   return ops
 }
+
+// ---------------------------------------------------------------------------
+// PDF text extraction via Python PyMuPDF (fitz)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract text from PDF using Python's PyMuPDF (fitz).
+ * Falls back gracefully if Python or PyMuPDF is unavailable.
+ */
+async function extractPdfTextViaPython(buffer) {
+  const tmpFile = join(tmpdir(), `ima-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`)
+  try {
+    await writeFile(tmpFile, buffer)
+    const { stdout } = await execFileAsync('python3', ['-c', `
+import fitz
+doc = fitz.open(${JSON.stringify(tmpFile)})
+for page in doc:
+    print(page.get_text())
+`], { timeout: 30000 })
+    const text = stdout.trim()
+    // 若 PyMuPDF 无结果，回退纯 JS 提取（处理 literal-string 文本层 PDF）。
+    return text || pdfExtractText(buffer)
+  } catch {
+    return pdfExtractText(buffer)
+  } finally {
+    await unlink(tmpFile).catch(() => {})
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTML → clean text (for WeChat articles and web pages fed to agents)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip HTML down to plain text, preserving paragraph/heading/list structure.
+ * Good enough for WeChat mp articles (h1-h4, p, li, strong, br) and general
+ * web pages. Script/style/svg are removed entirely.
+ */
+function htmlToText(html) {
+  let s = String(html)
+  // Remove entire elements that never contain readable prose.
+  s = s.replace(/<(script|style|svg|noscript|iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+  // Block-level tags become newlines.
+  s = s.replace(/<\/(p|div|h[1-6]|li|tr|blockquote|section|article|br)\s*\/?>/gi, '\n')
+  s = s.replace(/<br\s*\/?>/gi, '\n')
+  // List items get a bullet.
+  s = s.replace(/<li\b[^>]*>/gi, '\n• ')
+  // Headings get a prefix.
+  s = s.replace(/<h([1-6])\b[^>]*>/gi, (_m, n) => '\n' + '#'.repeat(Number(n)) + ' ')
+  // Strip every remaining tag.
+  s = s.replace(/<[^>]+>/g, '')
+  // Decode the handful of entities that matter for Chinese text.
+  s = s
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_m, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16)))
+  // Collapse whitespace.
+  s = s.replace(/[ \t]+/g, ' ')
+  s = s.replace(/\n\s*\n\s*\n/g, '\n\n')
+  return s.trim()
+}
+
+// ---------------------------------------------------------------------------
+// PDF text extraction (no external dependency; handles simple text-layer PDFs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Very small PDF text extractor — fallback when PyMuPDF is unavailable.
+ * Works for PDFs that store text as literal strings in BT…ET blocks.
+ * CID-font / image-only PDFs will return an empty string.
+ */
+function pdfExtractText(buffer) {
+  const text = buffer.toString('latin1')
+  const chunks = []
+  // Find all BT…ET text objects.
+  const re = /BT[\s\S]*?ET/g
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const block = m[0]
+    // Extract literal strings inside parentheses.
+    const strRe = /\(([^)]*)\)\s*Tj/g
+    let sm
+    while ((sm = strRe.exec(block)) !== null) {
+      chunks.push(sm[1])
+    }
+    // TJ arrays: [(str1) -250 (str2)] TJ
+    const tjRe = /\[((?:\([^)]*\)\s*-?\d*\s*)+)\]\s*TJ/g
+    let tm
+    while ((tm = tjRe.exec(block)) !== null) {
+      const inner = tm[1]
+      const parts = []
+      const pr = /\(([^)]*)\)/g
+      let pm
+      while ((pm = pr.exec(inner)) !== null) parts.push(pm[1])
+      if (parts.length) chunks.push(parts.join(''))
+    }
+  }
+  // Unescape PDF literal string escapes.
+  return chunks
+    .join(' ')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\')
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function clamp(value, min, max) {
   const n = Number(value) || min
