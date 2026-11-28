@@ -19,6 +19,22 @@
 
 凭证在 <https://ima.qq.com/agent-interface> 申请。
 
+## PDF 正文提取依赖
+
+读取 PDF 时，插件会尝试提取正文而不是只给下载链接。为正确处理中文 CID 字体与扫描件以外的文本层，它依赖 Python 的 **PyMuPDF**：
+
+- 需要本机有 `python3`（或 `python`）
+- 首次读取 PDF 时，若检测不到 `fitz`（PyMuPDF），插件会**自动尝试安装**：`pip install pymupdf`（先全局，再 `--user`）
+- 只有安装失败（如网络不通、无 pip 权限）时才回退到内置的纯 JS 提取器——它只处理「literal-string 文本层」PDF，对中文 CID 字体或扫描件可能提取不到正文
+
+想手动预装：
+
+```bash
+pip3 install pymupdf
+```
+
+> 扫描件 / 纯图片 PDF 没有文本层，任何提取器都取不到正文，此时插件会返回原文下载链接，可自行 OCR。
+
 ## 结构
 
 ```

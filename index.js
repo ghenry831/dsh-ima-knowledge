@@ -709,23 +709,78 @@ function makeOps(ctx) {
 // PDF text extraction via Python PyMuPDF (fitz)
 // ---------------------------------------------------------------------------
 
+/** 运行一个 Python 命令，返回 { ok, stdout, stderr }；不会抛异常。 */
+async function runPython(args, timeoutMs = 30000) {
+  const bin = await resolvePythonBin()
+  if (!bin) return { ok: false, stderr: 'python not found' }
+  try {
+    const { stdout } = await execFileAsync(bin, args, { timeout: timeoutMs })
+    return { ok: true, stdout }
+  } catch (error) {
+    return { ok: false, stderr: error.stderr ?? '', code: error.code }
+  }
+}
+
+let _pythonBin
+/** 优先 python3，其次 python；缓存结果。 */
+async function resolvePythonBin() {
+  if (_pythonBin !== undefined) return _pythonBin
+  for (const bin of ['python3', 'python']) {
+    try {
+      await execFileAsync(bin, ['-c', ''])
+      _pythonBin = bin
+      return _pythonBin
+    } catch { /* try next */ }
+  }
+  _pythonBin = null
+  return _pythonBin
+}
+
+/** PyMuPDF(fitz) 是否可用。 */
+async function hasFitz() {
+  return (await runPython(['-c', 'import fitz'], 15000)).ok
+}
+
 /**
- * Extract text from PDF using Python's PyMuPDF (fitz).
- * Falls back gracefully if Python or PyMuPDF is unavailable.
+ * 尽力安装 PyMuPDF。网络不通 / 权限不足时返回 false。
+ * 先试全局安装，再试 --user（覆盖仅用户站点可写的环境）。
+ */
+async function installPymupdf() {
+  const attempts = [
+    ['-m', 'pip', 'install', '--quiet', 'pymupdf'],
+    ['-m', 'pip', 'install', '--quiet', '--user', 'pymupdf'],
+  ]
+  for (const args of attempts) {
+    if ((await runPython(args, 180000)).ok) return true
+  }
+  return false
+}
+
+/**
+ * 提取 PDF 正文。
+ * 1. 优先用 Python PyMuPDF(fitz)（正确处理 CID 字体/中文）。
+ * 2. 若 fitz 缺失，先尝试 pip 安装 PyMuPDF。
+ * 3. 安装失败（网络不通等）才回退纯 JS literal-string 提取。
  */
 async function extractPdfTextViaPython(buffer) {
   const tmpFile = join(tmpdir(), `ima-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`)
   try {
     await writeFile(tmpFile, buffer)
-    const { stdout } = await execFileAsync('python3', ['-c', `
-import fitz
+
+    if (!(await hasFitz()) && !(await installPymupdf())) {
+      return pdfExtractText(buffer)
+    }
+
+    const script = `import fitz
 doc = fitz.open(${JSON.stringify(tmpFile)})
 for page in doc:
-    print(page.get_text())
-`], { timeout: 30000 })
-    const text = stdout.trim()
-    // 若 PyMuPDF 无结果，回退纯 JS 提取（处理 literal-string 文本层 PDF）。
-    return text || pdfExtractText(buffer)
+    print(page.get_text())`
+    const result = await runPython(['-c', script], 30000)
+    if (result.ok) {
+      const text = result.stdout.trim()
+      return text || pdfExtractText(buffer)
+    }
+    return pdfExtractText(buffer)
   } catch {
     return pdfExtractText(buffer)
   } finally {
